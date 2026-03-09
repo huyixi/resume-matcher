@@ -9,7 +9,8 @@ const nextConfig: NextConfig = {
   },
   async rewrites() {
     // Note: Next.js serves filesystem routes (app/api/) before rewrites.
-    // Do not create app/api/ routes or they will shadow the backend proxy.
+    // Long-running improve routes use dedicated app/api handlers.
+    // Keep the rewrite for all other backend requests.
     return [
       {
         source: '/api/:path*',
