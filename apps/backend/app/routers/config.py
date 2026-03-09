@@ -26,7 +26,9 @@ from app.schemas import (
 )
 from app.prompts import DEFAULT_IMPROVE_PROMPT_ID, IMPROVE_PROMPT_OPTIONS
 from app.config import (
+    _get_api_key_provider_name,
     get_api_keys_from_config,
+    get_api_key_for_provider,
     save_api_keys_to_config,
     delete_api_key_from_config,
     clear_all_api_keys,
@@ -65,6 +67,55 @@ def _mask_api_key(key: str) -> str:
     return key[:4] + "*" * (len(key) - 8) + key[-4:]
 
 
+def _resolve_llm_api_key(
+    provider: str,
+    stored: dict,
+    request: LLMConfigRequest | None = None,
+) -> str:
+    """Resolve the effective LLM API key for UI/test/runtime config endpoints."""
+    if request and request.api_key is not None:
+        return request.api_key
+
+    top_level_key = stored.get("api_key", "")
+    if isinstance(top_level_key, str) and top_level_key:
+        return top_level_key
+
+    provider_key = get_api_key_for_provider(provider, stored)
+    if provider_key:
+        return provider_key
+
+    return settings.get_effective_api_key()
+
+
+def _build_llm_config(
+    stored: dict,
+    request: LLMConfigRequest | None = None,
+) -> LLMConfig:
+    """Build effective LLM config from request + stored values."""
+    provider = (
+        request.provider
+        if request and request.provider
+        else stored.get("provider", settings.llm_provider)
+    )
+    model = (
+        request.model
+        if request and request.model
+        else stored.get("model", settings.llm_model)
+    )
+    api_base = (
+        request.api_base
+        if request and request.api_base is not None
+        else stored.get("api_base", settings.llm_api_base)
+    )
+
+    return LLMConfig(
+        provider=provider,
+        model=model,
+        api_key=_resolve_llm_api_key(provider, stored, request),
+        api_base=api_base,
+    )
+
+
 def _get_prompt_options() -> list[PromptOption]:
     """Return available prompt options for resume tailoring."""
     return [PromptOption(**option) for option in IMPROVE_PROMPT_OPTIONS]
@@ -90,12 +141,13 @@ async def _log_llm_health_check(config: LLMConfig) -> None:
 async def get_llm_config_endpoint() -> LLMConfigResponse:
     """Get current LLM configuration (API key masked)."""
     stored = _load_config()
+    config = _build_llm_config(stored)
 
     return LLMConfigResponse(
-        provider=stored.get("provider", settings.llm_provider),
-        model=stored.get("model", settings.llm_model),
-        api_key=_mask_api_key(stored.get("api_key", settings.llm_api_key)),
-        api_base=stored.get("api_base", settings.llm_api_base),
+        provider=config.provider,
+        model=config.model,
+        api_key=_mask_api_key(config.api_key),
+        api_base=config.api_base,
     )
 
 
@@ -122,16 +174,21 @@ async def update_llm_config(
         stored["model"] = request.model
     if request.api_key is not None:
         stored["api_key"] = request.api_key
+        effective_provider = stored.get("provider", settings.llm_provider)
+        api_keys = stored.get("api_keys", {})
+        if not isinstance(api_keys, dict):
+            api_keys = {}
+        provider_key = _get_api_key_provider_name(str(effective_provider))
+        if request.api_key:
+            api_keys[provider_key] = request.api_key
+        else:
+            api_keys.pop(provider_key, None)
+        stored["api_keys"] = api_keys
     if request.api_base is not None:
         stored["api_base"] = request.api_base
 
     # Build normalized config for response
-    test_config = LLMConfig(
-        provider=stored.get("provider", settings.llm_provider),
-        model=stored.get("model", settings.llm_model),
-        api_key=stored.get("api_key", settings.llm_api_key),
-        api_base=stored.get("api_base", settings.llm_api_base),
-    )
+    test_config = _build_llm_config(stored)
 
     # Save config regardless of health check outcome (see docstring).
     _save_config(stored)
@@ -157,28 +214,7 @@ async def test_llm_connection(request: LLMConfigRequest | None = None) -> dict:
     stored = _load_config()
 
     # Build config: use request values if provided, otherwise fall back to stored/default
-    config = LLMConfig(
-        provider=(
-            request.provider
-            if request and request.provider
-            else stored.get("provider", settings.llm_provider)
-        ),
-        model=(
-            request.model
-            if request and request.model
-            else stored.get("model", settings.llm_model)
-        ),
-        api_key=(
-            request.api_key
-            if request and request.api_key
-            else stored.get("api_key", settings.llm_api_key)
-        ),
-        api_base=(
-            request.api_base
-            if request and request.api_base is not None
-            else stored.get("api_base", settings.llm_api_base)
-        ),
-    )
+    config = _build_llm_config(stored, request)
 
     test_prompt = "Hi"
     return await check_llm_health(config, include_details=True, test_prompt=test_prompt)

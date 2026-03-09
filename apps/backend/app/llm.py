@@ -8,7 +8,7 @@ from typing import Any
 import litellm
 from pydantic import BaseModel
 
-from app.config import settings
+from app.config import get_api_key_for_provider, settings
 
 LITELLM_LOGGER_NAMES = ("LiteLLM", "LiteLLM Router", "LiteLLM Proxy")
 
@@ -246,10 +246,18 @@ def get_llm_config() -> LLMConfig:
     """
     stored = _load_stored_config()
 
+    provider = stored.get("provider", settings.llm_provider)
+    stored_api_key = stored.get("api_key")
+    api_key = stored_api_key if isinstance(stored_api_key, str) else ""
+    if not api_key:
+        api_key = get_api_key_for_provider(provider, stored)
+    if not api_key:
+        api_key = settings.get_effective_api_key()
+
     return LLMConfig(
-        provider=stored.get("provider", settings.llm_provider),
+        provider=provider,
         model=stored.get("model", settings.llm_model),
-        api_key=stored.get("api_key", settings.llm_api_key),
+        api_key=api_key,
         api_base=stored.get("api_base", settings.llm_api_base),
     )
 
