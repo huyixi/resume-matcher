@@ -48,6 +48,34 @@ def get_api_keys_from_config() -> dict[str, str]:
     return config.get("api_keys", {})
 
 
+def _get_api_key_provider_name(provider: str) -> str:
+    """Normalize provider names for provider-scoped API key storage."""
+    provider_map = {
+        "openai": "openai",
+        "anthropic": "anthropic",
+        "gemini": "google",
+        "google": "google",
+        "openrouter": "openrouter",
+        "deepseek": "deepseek",
+        "ollama": "ollama",
+    }
+    return provider_map.get(provider, provider)
+
+
+def get_api_key_for_provider(
+    provider: str,
+    config: dict[str, Any] | None = None,
+) -> str:
+    """Get a provider-scoped API key from config storage."""
+    stored = load_config_file() if config is None else config
+    api_keys = stored.get("api_keys", {})
+    if not isinstance(api_keys, dict):
+        return ""
+
+    key = api_keys.get(_get_api_key_provider_name(provider), "")
+    return key if isinstance(key, str) else ""
+
+
 def save_api_keys_to_config(api_keys: dict[str, str]) -> None:
     """Save API keys to config file.
 
@@ -81,7 +109,7 @@ def clear_all_api_keys() -> None:
     save_config_file(config)
 
 
-def _get_llm_api_key_with_fallback() -> str:
+def _get_llm_api_key_with_fallback(provider: str | None = None) -> str:
     """Get LLM API key with fallback to config file.
 
     Priority: Environment variable > config.json > empty string
@@ -93,22 +121,15 @@ def _get_llm_api_key_with_fallback() -> str:
     if env_key:
         return env_key
 
-    # Fallback to config file based on provider
-    config_keys = get_api_keys_from_config()
-    provider = os.environ.get("LLM_PROVIDER", "openai")
+    config = load_config_file()
+    top_level_key = config.get("api_key", "")
+    if isinstance(top_level_key, str) and top_level_key:
+        return top_level_key
 
-    # Map provider to config key
-    provider_map = {
-        "openai": "openai",
-        "anthropic": "anthropic",
-        "gemini": "google",
-        "openrouter": "openrouter",
-        "deepseek": "deepseek",
-        "ollama": "ollama",
-    }
-
-    config_provider = provider_map.get(provider, provider)
-    return config_keys.get(config_provider, "")
+    effective_provider = provider or config.get("provider") or os.environ.get(
+        "LLM_PROVIDER", "openai"
+    )
+    return get_api_key_for_provider(str(effective_provider), config)
 
 
 class Settings(BaseSettings):
