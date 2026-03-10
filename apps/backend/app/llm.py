@@ -3,7 +3,7 @@
 import json
 import logging
 import re
-from typing import Any
+from typing import Any, Callable
 
 import litellm
 from pydantic import BaseModel
@@ -62,6 +62,28 @@ OPENROUTER_JSON_CAPABLE_MODELS = {
 # JSON-010: JSON extraction safety limits
 MAX_JSON_EXTRACTION_RECURSION = 10
 MAX_JSON_CONTENT_SIZE = 1024 * 1024  # 1MB
+RESUME_JSON_RETRY_SUFFIX = (
+    "IMPORTANT: Output the COMPLETE JSON object with ALL sections including "
+    "personalInfo. Do not truncate."
+)
+
+JsonIssueChecker = Callable[[dict[str, Any]], str | None]
+
+
+class AIServiceError(Exception):
+    """Normalized LLM/provider error surfaced to API routes."""
+
+    def __init__(
+        self,
+        *,
+        error_code: str,
+        status_code: int,
+        detail: str,
+    ) -> None:
+        super().__init__(detail)
+        self.error_code = error_code
+        self.status_code = status_code
+        self.detail = detail
 
 
 class LLMConfig(BaseModel):
@@ -218,6 +240,123 @@ def _extract_choice_text(choice: Any) -> str | None:
             return content
 
     return None
+
+
+def _classify_ai_error(
+    error: Exception,
+    *,
+    config: LLMConfig,
+    operation: str,
+) -> AIServiceError:
+    """Normalize provider and model failures into stable API-facing errors."""
+    if isinstance(error, AIServiceError):
+        return error
+
+    if config.provider != "ollama" and not config.api_key:
+        return AIServiceError(
+            error_code="api_key_missing",
+            status_code=400,
+            detail="LLM API key is not configured.",
+        )
+
+    normalized = f"{type(error).__name__}: {error}".lower()
+
+    auth_patterns = (
+        "authenticationerror",
+        "authentication failed",
+        "invalid api key",
+        "incorrect api key",
+        "api key not valid",
+        "unauthorized",
+        "permission denied",
+        "invalid x-api-key",
+        "401",
+    )
+    rate_limit_patterns = (
+        "ratelimiterror",
+        "rate limit",
+        "too many requests",
+        "resource exhausted",
+        "quota",
+        "429",
+    )
+    timeout_patterns = (
+        "timeout",
+        "timed out",
+        "deadline exceeded",
+    )
+    invalid_response_patterns = (
+        "json parse failed",
+        "failed to parse json",
+        "jsondecodeerror",
+        "empty response from llm",
+        "missing required section",
+        "validationerror",
+        "invalid json",
+    )
+    unavailable_patterns = (
+        "service unavailable",
+        "temporarily unavailable",
+        "connection error",
+        "apiconnectionerror",
+        "connect timeout",
+        "bad gateway",
+        "gateway timeout",
+        "502",
+        "503",
+        "504",
+    )
+
+    if any(pattern in normalized for pattern in auth_patterns):
+        return AIServiceError(
+            error_code="auth_failed",
+            status_code=401,
+            detail="LLM authentication failed. Please check your API key and provider settings.",
+        )
+
+    if any(pattern in normalized for pattern in rate_limit_patterns):
+        return AIServiceError(
+            error_code="rate_limited",
+            status_code=429,
+            detail="The LLM provider rate limit was reached. Please try again shortly.",
+        )
+
+    if any(pattern in normalized for pattern in timeout_patterns):
+        return AIServiceError(
+            error_code="provider_timeout",
+            status_code=504,
+            detail="The LLM provider timed out while processing the request. Please try again.",
+        )
+
+    if any(pattern in normalized for pattern in invalid_response_patterns):
+        return AIServiceError(
+            error_code="invalid_model_response",
+            status_code=502,
+            detail="The LLM provider returned an invalid response. Please try again or switch models.",
+        )
+
+    if any(pattern in normalized for pattern in unavailable_patterns):
+        return AIServiceError(
+            error_code="provider_unavailable",
+            status_code=502,
+            detail="The LLM provider is temporarily unavailable. Please try again later.",
+        )
+
+    logging.error(
+        "Unclassified AI error during %s",
+        operation,
+        extra={
+            "provider": config.provider,
+            "model": config.model,
+            "error_type": type(error).__name__,
+        },
+        exc_info=error,
+    )
+    return AIServiceError(
+        error_code="provider_unavailable",
+        status_code=502,
+        detail="The LLM provider could not complete the request. Please try again later.",
+    )
 
 
 def _to_code_block(content: str | None, language: str = "text") -> str:
@@ -431,6 +570,13 @@ async def complete(
     if config is None:
         config = get_llm_config()
 
+    if config.provider != "ollama" and not config.api_key:
+        raise AIServiceError(
+            error_code="api_key_missing",
+            status_code=400,
+            detail="LLM API key is not configured.",
+        )
+
     model_name = get_model_name(config)
 
     messages = []
@@ -461,11 +607,7 @@ async def complete(
             raise ValueError("Empty response from LLM")
         return content
     except Exception as e:
-        # Log the actual error server-side for debugging
-        logging.error(f"LLM completion failed: {e}", extra={"model": model_name})
-        raise ValueError(
-            "LLM completion failed. Please check your API configuration and try again."
-        ) from e
+        raise _classify_ai_error(e, config=config, operation="completion") from e
 
 
 def _supports_json_mode(provider: str, model: str) -> bool:
@@ -480,36 +622,22 @@ def _supports_json_mode(provider: str, model: str) -> bool:
     return False
 
 
-def _appears_truncated(data: dict) -> bool:
-    """LLM-001: Check if JSON data appears to be truncated.
-
-    Detects suspicious patterns indicating incomplete responses.
-    """
+def _check_resume_json_truncation(data: dict[str, Any]) -> str | None:
+    """LLM-001: Detect suspiciously incomplete resume-shaped JSON payloads."""
     if not isinstance(data, dict):
-        return False
+        return None
 
-    # Check for empty arrays that should typically have content
     suspicious_empty_arrays = ["workExperience", "education", "skills"]
     for key in suspicious_empty_arrays:
         if key in data and data[key] == []:
-            # Log warning - these are rarely empty in real resumes
-            logging.warning(
-                "Possible truncation detected: '%s' is empty",
-                key,
-            )
-            return True
+            return f"'{key}' is empty"
 
-    # Check for missing critical sections
     required_top_level = ["personalInfo"]
     for key in required_top_level:
         if key not in data:
-            logging.warning(
-                "Possible truncation detected: missing required section '%s'",
-                key,
-            )
-            return True
+            return f"missing required section '{key}'"
 
-    return False
+    return None
 
 
 def _get_retry_temperature(attempt: int, base_temp: float = 0.1) -> float:
@@ -636,6 +764,8 @@ async def complete_json(
     config: LLMConfig | None = None,
     max_tokens: int = 4096,
     retries: int = 2,
+    truncation_checker: JsonIssueChecker | None = None,
+    retry_prompt_suffix: str | None = None,
 ) -> dict[str, Any]:
     """Make a completion request expecting JSON response.
 
@@ -643,6 +773,13 @@ async def complete_json(
     """
     if config is None:
         config = get_llm_config()
+
+    if config.provider != "ollama" and not config.api_key:
+        raise AIServiceError(
+            error_code="api_key_missing",
+            status_code=400,
+            detail="LLM API key is not configured.",
+        )
 
     model_name = get_model_name(config)
 
@@ -694,21 +831,29 @@ async def complete_json(
             json_str = _extract_json(content)
             result = json.loads(json_str)
 
+            if isinstance(result, dict) and truncation_checker is not None:
+                truncation_issue = truncation_checker(result)
+            else:
+                truncation_issue = None
+
             # LLM-001: Check if parsed result appears truncated
-            if isinstance(result, dict) and _appears_truncated(result):
+            if truncation_issue:
                 if attempt < retries:
                     logging.warning(
-                        "Parsed JSON appears truncated (attempt %d/%d), retrying",
+                        "Parsed JSON appears truncated (%s) (attempt %d/%d), retrying",
+                        truncation_issue,
                         attempt + 1,
                         retries + 1,
                     )
                     messages[-1]["content"] = (
                         prompt
-                        + "\n\nIMPORTANT: Output the COMPLETE JSON object with ALL sections including personalInfo. Do not truncate."
+                        + "\n\n"
+                        + (retry_prompt_suffix or RESUME_JSON_RETRY_SUFFIX)
                     )
                     continue
                 logging.warning(
-                    "Parsed JSON appears truncated on final attempt, proceeding with result"
+                    "Parsed JSON appears truncated on final attempt (%s), proceeding with result",
+                    truncation_issue,
                 )
 
             return result
@@ -723,13 +868,27 @@ async def complete_json(
                     + "\n\nIMPORTANT: Output ONLY a valid JSON object. Start with { and end with }."
                 )
                 continue
-            raise ValueError(f"Failed to parse JSON after {retries + 1} attempts: {e}")
+            raise AIServiceError(
+                error_code="invalid_model_response",
+                status_code=502,
+                detail="The LLM provider returned an invalid response. Please try again or switch models.",
+            ) from e
 
         except Exception as e:
             last_error = e
             logging.warning(f"LLM call failed (attempt {attempt + 1}): {e}")
             if attempt < retries:
                 continue
-            raise
+            raise _classify_ai_error(e, config=config, operation="json_completion") from e
 
-    raise ValueError(f"Failed after {retries + 1} attempts: {last_error}")
+    if isinstance(last_error, Exception):
+        raise _classify_ai_error(
+            last_error,
+            config=config,
+            operation="json_completion",
+        ) from last_error
+    raise AIServiceError(
+        error_code="provider_unavailable",
+        status_code=502,
+        detail="The LLM provider could not complete the request. Please try again later.",
+    )

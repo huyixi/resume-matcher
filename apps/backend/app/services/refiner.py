@@ -14,7 +14,7 @@ import re
 from functools import lru_cache
 from typing import Any
 
-from app.llm import complete_json
+from app.llm import RESUME_JSON_RETRY_SUFFIX, _check_resume_json_truncation, complete_json
 from app.prompts.refinement import (
     AI_PHRASE_BLACKLIST,
     AI_PHRASE_REPLACEMENTS,
@@ -33,19 +33,78 @@ logger = logging.getLogger(__name__)
 # LLM-012: Job description truncation limits
 MAX_JD_LENGTH = 2000
 MIN_TRUNCATION_WARNING_LENGTH = 1500
+_RAW_TERM_ALIAS_GROUPS = (
+    ("vue", "vue.js", "vuejs", "vue 3"),
+    ("react", "react.js", "reactjs"),
+    ("element-ui", "element ui", "elementui", "element plus", "elementplus"),
+    ("uni-app", "uni app", "uniapp"),
+    ("node.js", "node js", "nodejs"),
+    ("ant-design", "ant design", "antdesign", "antd"),
+)
+
+
+def _canonicalize_term(value: str) -> str:
+    """Normalize punctuation and spacing for skill-like terms."""
+    normalized = value.casefold().strip()
+    normalized = re.sub(r"[._/\-]+", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized
+
+
+def _build_alias_index() -> dict[str, set[str]]:
+    """Build a canonical alias lookup for common framework variants."""
+    index: dict[str, set[str]] = {}
+    for group in _RAW_TERM_ALIAS_GROUPS:
+        canonical_group = {_canonicalize_term(term) for term in group}
+        for term in canonical_group:
+            index[term] = canonical_group
+    return index
+
+
+_TERM_ALIAS_INDEX = _build_alias_index()
+
+
+def _contains_non_ascii(value: str) -> bool:
+    """Return True when a term contains non-ASCII characters."""
+    return any(ord(char) > 127 for char in value)
+
+
+def _term_variants(term: str) -> set[str]:
+    """Return canonical variants for a term, including a small alias allowlist."""
+    canonical = _canonicalize_term(term)
+    if not canonical:
+        return set()
+
+    variants = {canonical}
+    alias_group = _TERM_ALIAS_INDEX.get(canonical)
+    if alias_group:
+        variants.update(alias_group)
+    return variants
+
+
+def _canonicalized_term_in_text(term: str, text: str) -> bool:
+    """Match a canonicalized term against canonicalized evidence text."""
+    if not term or not text:
+        return False
+    if _contains_non_ascii(term):
+        return term in text
+
+    pattern = rf"(?<![a-z0-9]){re.escape(term)}(?![a-z0-9])"
+    return bool(re.search(pattern, text))
 
 
 def _keyword_in_text(keyword: str, text: str) -> bool:
-    """Check if keyword exists as a whole word in text.
+    """Check if a keyword is supported by text after normalization.
 
-    SVC-010: Uses word boundaries instead of substring matching to avoid
-    false positives like 'python' matching 'pythonic' or 'go' matching 'going'.
+    Uses canonicalization plus word-boundary matching for ASCII terms to avoid
+    false positives like 'python' matching 'pythonic', while still supporting
+    CJK phrases and punctuation variants such as 'Element-ui' / 'ElementUI'.
     """
-    # Escape special regex characters in keyword
-    escaped = re.escape(keyword.lower())
-    # Use word boundaries
-    pattern = rf"\b{escaped}\b"
-    return bool(re.search(pattern, text.lower()))
+    canonical_text = _canonicalize_term(text)
+    return any(
+        _canonicalized_term_in_text(variant, canonical_text)
+        for variant in _term_variants(keyword)
+    )
 
 
 async def refine_resume(
@@ -254,20 +313,23 @@ def validate_master_alignment(
         AlignmentReport with violations and confidence score
     """
     violations: list[AlignmentViolation] = []
+    master_text = _extract_all_text(master)
+    seen_skill_keys: set[str] = set()
 
     # Check skills
-    tailored_skills = set(
-        s.lower()
+    tailored_skills = [
+        s.strip()
         for s in tailored.get("additional", {}).get("technicalSkills", [])
-        if isinstance(s, str)
-    )
-    master_skills = set(
-        s.lower()
-        for s in master.get("additional", {}).get("technicalSkills", [])
-        if isinstance(s, str)
-    )
+        if isinstance(s, str) and s.strip()
+    ]
 
-    for skill in tailored_skills - master_skills:
+    for skill in tailored_skills:
+        canonical_skill = _canonicalize_term(skill)
+        if canonical_skill in seen_skill_keys:
+            continue
+        seen_skill_keys.add(canonical_skill)
+        if _keyword_in_text(skill, master_text):
+            continue
         violations.append(
             AlignmentViolation(
                 field_path="additional.technicalSkills",
@@ -278,18 +340,20 @@ def validate_master_alignment(
         )
 
     # Check certifications
-    tailored_certs = set(
-        c.lower()
+    seen_cert_keys: set[str] = set()
+    tailored_certs = [
+        c.strip()
         for c in tailored.get("additional", {}).get("certificationsTraining", [])
-        if isinstance(c, str)
-    )
-    master_certs = set(
-        c.lower()
-        for c in master.get("additional", {}).get("certificationsTraining", [])
-        if isinstance(c, str)
-    )
+        if isinstance(c, str) and c.strip()
+    ]
 
-    for cert in tailored_certs - master_certs:
+    for cert in tailored_certs:
+        canonical_cert = _canonicalize_term(cert)
+        if canonical_cert in seen_cert_keys:
+            continue
+        seen_cert_keys.add(canonical_cert)
+        if _keyword_in_text(cert, master_text):
+            continue
         violations.append(
             AlignmentViolation(
                 field_path="additional.certificationsTraining",
@@ -416,6 +480,8 @@ async def inject_keywords(
                 "fabricated content. Return only valid JSON matching the input schema."
             ),
             max_tokens=8192,
+            truncation_checker=_check_resume_json_truncation,
+            retry_prompt_suffix=RESUME_JSON_RETRY_SUFFIX,
         )
 
         # LLM-014: Validate the result maintains required structure

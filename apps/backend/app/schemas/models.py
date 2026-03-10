@@ -5,7 +5,7 @@ import re
 from enum import Enum
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 _TEXT_VALUE_KEYS = (
     "text",
@@ -357,6 +357,54 @@ class ResumeData(BaseModel):
     @classmethod
     def _normalize_summary(cls, value: Any) -> str:
         return _coerce_text(value)
+
+
+class JobKeywordExtraction(BaseModel):
+    """Structured job keyword extraction payload."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    required_skills: list[str] = Field(default_factory=list)
+    preferred_skills: list[str] = Field(default_factory=list)
+    experience_requirements: list[str] = Field(default_factory=list)
+    education_requirements: list[str] = Field(default_factory=list)
+    key_responsibilities: list[str] = Field(default_factory=list)
+    keywords: list[str] = Field(default_factory=list)
+    experience_years: int | None = None
+    seniority_level: str | None = None
+
+    @field_validator(
+        "required_skills",
+        "preferred_skills",
+        "experience_requirements",
+        "education_requirements",
+        "key_responsibilities",
+        "keywords",
+        mode="before",
+    )
+    @classmethod
+    def _normalize_list_fields(cls, value: Any) -> list[str]:
+        return _coerce_string_list(value)
+
+    @field_validator("experience_years", mode="before")
+    @classmethod
+    def _normalize_experience_years(cls, value: Any) -> int | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                return None
+            match = re.search(r"\d+", stripped)
+            if not match:
+                return None
+            return int(match.group())
+        return value
+
+    @field_validator("seniority_level", mode="before")
+    @classmethod
+    def _normalize_seniority_level(cls, value: Any) -> str | None:
+        return _coerce_optional_text(value)
 
 
 # API Response Models

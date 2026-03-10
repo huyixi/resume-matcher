@@ -123,15 +123,15 @@ export const SECTION_HEADER_SCALE_MAP: Record<SpacingLevel, number> = {
 
 // Header font family mapping
 export const HEADER_FONT_MAP: Record<HeaderFontFamily, string> = {
-  serif: 'ui-serif, Georgia, Cambria, "Times New Roman", Times, serif',
-  'sans-serif': 'ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji"',
-  mono: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
+  serif: 'var(--font-serif)',
+  'sans-serif': 'var(--font-sans)',
+  mono: 'var(--font-mono)',
 };
 
 export const BODY_FONT_MAP: Record<BodyFontFamily, string> = {
-  serif: 'ui-serif, Georgia, Cambria, "Times New Roman", Times, serif',
-  'sans-serif': 'ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji"',
-  mono: 'ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace',
+  serif: 'var(--font-serif)',
+  'sans-serif': 'var(--font-sans)',
+  mono: 'var(--font-mono)',
 };
 
 /**

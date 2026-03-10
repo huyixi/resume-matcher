@@ -51,8 +51,9 @@
   --shadow-sw-card: 6px 6px 0px 0px #000000;
 
   /* Fonts */
-  --font-sans: 'Geist Sans', sans-serif;
-  --font-mono: 'Space Grotesk', monospace;
+  --font-sans: var(--font-ui-sans);
+  --font-serif: var(--font-ui-serif);
+  --font-mono: var(--font-ui-mono);
 
   /* Animations */
   --animate-gradient: gradient 8s linear infinite;
@@ -65,8 +66,23 @@
 }
 
 :root {
-  --font-mono: 'Geist Mono', monospace;
-  --font-sans: 'Geist', sans-serif;
+  --font-ui-cjk-sans:
+    'Noto Sans CJK SC', 'Noto Sans SC', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei',
+    'WenQuanYi Micro Hei', 'Source Han Sans SC', sans-serif;
+  --font-ui-cjk-serif:
+    'Noto Serif CJK SC', 'Noto Serif SC', 'Songti SC', 'STSong', 'SimSun', 'Source Han Serif SC',
+    serif;
+  --font-ui-cjk-mono:
+    'Noto Sans Mono CJK SC', 'Noto Sans Mono', 'Noto Sans CJK SC', 'Noto Sans SC', 'PingFang SC',
+    'Hiragino Sans GB', 'Microsoft YaHei', monospace;
+  --font-ui-sans:
+    'Geist', 'Geist Sans', var(--font-ui-cjk-sans), ui-sans-serif, system-ui, sans-serif,
+    'Apple Color Emoji', 'Segoe UI Emoji';
+  --font-ui-serif:
+    var(--font-ui-cjk-serif), ui-serif, Georgia, Cambria, 'Times New Roman', Times, serif;
+  --font-ui-mono:
+    'Space Grotesk', 'Geist Mono', var(--font-ui-cjk-mono), ui-monospace, SFMono-Regular, 'SF Mono',
+    Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
   --radius: 0.625rem;
 
   /* Swiss International Style Palette */
@@ -143,6 +159,7 @@
   }
   body {
     @apply bg-background text-foreground;
+    font-family: var(--font-sans);
   }
   button {
     font-family: var(--font-mono);

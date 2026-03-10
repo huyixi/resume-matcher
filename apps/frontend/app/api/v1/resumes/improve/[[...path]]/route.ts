@@ -35,6 +35,23 @@ function buildBackendUrl(requestUrl: string, path?: string[]): string {
   return `${BACKEND_ORIGIN}/api/v1/resumes/improve${suffix}${incomingUrl.search}`;
 }
 
+async function readUpstreamBody(upstream: Response): Promise<BodyInit | null> {
+  if (!upstream.body) {
+    return null;
+  }
+
+  const contentType = upstream.headers.get('content-type')?.toLowerCase() ?? '';
+  if (
+    contentType.includes('application/json') ||
+    contentType.startsWith('text/') ||
+    contentType.includes('charset=')
+  ) {
+    return await upstream.text();
+  }
+
+  return await upstream.arrayBuffer();
+}
+
 async function proxyImproveRequest(request: Request, path?: string[]): Promise<Response> {
   const body =
     request.method === 'GET' || request.method === 'HEAD' ? undefined : await request.text();
@@ -46,8 +63,9 @@ async function proxyImproveRequest(request: Request, path?: string[]): Promise<R
       body,
       cache: 'no-store',
     });
+    const responseBody = await readUpstreamBody(upstream);
 
-    return new Response(upstream.body, {
+    return new Response(responseBody, {
       status: upstream.status,
       statusText: upstream.statusText,
       headers: filterHeaders(upstream.headers),

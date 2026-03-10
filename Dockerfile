@@ -43,6 +43,8 @@ ENV PYTHONUNBUFFERED=1 \
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
+    fontconfig \
+    fonts-noto-cjk \
     # Playwright dependencies
     libnss3 \
     libnspr4 \

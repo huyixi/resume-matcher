@@ -8,27 +8,28 @@ const nextConfig: NextConfig = {
     turbopackUseSystemTlsCerts: true,
   },
   async rewrites() {
-    // Note: Next.js serves filesystem routes (app/api/) before rewrites.
-    // Long-running improve routes use dedicated app/api handlers.
-    // Keep the rewrite for all other backend requests.
-    return [
-      {
-        source: '/api/:path*',
-        destination: `${BACKEND_ORIGIN}/api/:path*`,
-      },
-      {
-        source: '/docs',
-        destination: `${BACKEND_ORIGIN}/docs`,
-      },
-      {
-        source: '/redoc',
-        destination: `${BACKEND_ORIGIN}/redoc`,
-      },
-      {
-        source: '/openapi.json',
-        destination: `${BACKEND_ORIGIN}/openapi.json`,
-      },
-    ];
+    // Keep long-running improve requests on the dedicated Route Handler by
+    // applying the catch-all backend rewrite only after filesystem routes.
+    return {
+      afterFiles: [
+        {
+          source: '/api/:path*',
+          destination: `${BACKEND_ORIGIN}/api/:path*`,
+        },
+        {
+          source: '/docs',
+          destination: `${BACKEND_ORIGIN}/docs`,
+        },
+        {
+          source: '/redoc',
+          destination: `${BACKEND_ORIGIN}/redoc`,
+        },
+        {
+          source: '/openapi.json',
+          destination: `${BACKEND_ORIGIN}/openapi.json`,
+        },
+      ],
+    };
   },
 };
 

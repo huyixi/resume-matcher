@@ -7,7 +7,7 @@ from difflib import SequenceMatcher
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from app.llm import complete_json
+from app.llm import RESUME_JSON_RETRY_SUFFIX, _check_resume_json_truncation, complete_json
 from app.prompts import (
     CRITICAL_TRUTHFULNESS_RULES,
     DEFAULT_IMPROVE_PROMPT_ID,
@@ -16,7 +16,7 @@ from app.prompts import (
     get_language_name,
 )
 from app.prompts.templates import RESUME_SCHEMA
-from app.schemas import ResumeData, ResumeFieldDiff, ResumeDiffSummary
+from app.schemas import JobKeywordExtraction, ResumeData, ResumeDiffSummary, ResumeFieldDiff
 
 logger = logging.getLogger(__name__)
 
@@ -81,10 +81,12 @@ async def extract_job_keywords(job_description: str) -> dict[str, Any]:
     sanitized_jd = _sanitize_user_input(job_description)
     prompt = EXTRACT_KEYWORDS_PROMPT.format(job_description=sanitized_jd)
 
-    return await complete_json(
+    result = await complete_json(
         prompt=prompt,
         system_prompt="You are an expert job description analyzer.",
     )
+    validated = JobKeywordExtraction.model_validate(result)
+    return validated.model_dump()
 
 
 async def improve_resume(
@@ -140,6 +142,8 @@ async def improve_resume(
         prompt=prompt,
         system_prompt="You are an expert resume editor. Output only valid JSON.",
         max_tokens=8192,
+        truncation_checker=_check_resume_json_truncation,
+        retry_prompt_suffix=RESUME_JSON_RETRY_SUFFIX,
     )
 
     # LLM-006: Pre-validation check for truncation signs

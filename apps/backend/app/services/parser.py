@@ -6,7 +6,7 @@ from typing import Any
 
 from markitdown import MarkItDown
 
-from app.llm import complete_json
+from app.llm import RESUME_JSON_RETRY_SUFFIX, _check_resume_json_truncation, complete_json
 from app.prompts import PARSE_RESUME_PROMPT
 from app.prompts.templates import RESUME_SCHEMA_EXAMPLE
 from app.schemas import ResumeData
@@ -54,6 +54,8 @@ async def parse_resume_to_json(markdown_text: str) -> dict[str, Any]:
     result = await complete_json(
         prompt=prompt,
         system_prompt="You are a JSON extraction engine. Output only valid JSON, no explanations.",
+        truncation_checker=_check_resume_json_truncation,
+        retry_prompt_suffix=RESUME_JSON_RETRY_SUFFIX,
     )
 
     # Validate against schema

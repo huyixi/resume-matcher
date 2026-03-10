@@ -108,6 +108,23 @@ export interface ResumeListItem {
   jobSnippet?: string;
 }
 
+interface ImproveErrorResponse {
+  detail?: string;
+  error_code?: string | null;
+}
+
+export class ImproveRequestError extends Error {
+  status: number;
+  errorCode: string | null;
+
+  constructor(status: number, message: string, errorCode: string | null = null) {
+    super(message);
+    this.name = 'ImproveRequestError';
+    this.status = status;
+    this.errorCode = errorCode;
+  }
+}
+
 async function postImprove(
   endpoint: string,
   payload: Record<string, unknown>
@@ -123,7 +140,19 @@ async function postImprove(
   const text = await response.text();
   if (!response.ok) {
     console.error('Improve failed response body:', text);
-    throw new Error(`Improve failed with status ${response.status}: ${text}`);
+    let errorPayload: ImproveErrorResponse | null = null;
+    try {
+      errorPayload = JSON.parse(text) as ImproveErrorResponse;
+    } catch {
+      errorPayload = null;
+    }
+
+    const detail =
+      typeof errorPayload?.detail === 'string' && errorPayload.detail.trim()
+        ? errorPayload.detail
+        : text || `Improve failed with status ${response.status}.`;
+    const errorCode = typeof errorPayload?.error_code === 'string' ? errorPayload.error_code : null;
+    throw new ImproveRequestError(response.status, detail, errorCode);
   }
 
   try {

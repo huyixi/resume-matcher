@@ -1,11 +1,13 @@
 """FastAPI application entry point."""
 
 import asyncio
+import faulthandler
 import logging
 import sys
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 
 # Fix for Windows: Use ProactorEventLoop for subprocess support (Playwright)
 if sys.platform == "win32":
@@ -17,6 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app import __version__
 from app.config import settings
 from app.database import db
+from app.llm import AIServiceError
 from app.pdf import close_pdf_renderer, init_pdf_renderer
 from app.routers import config_router, enrichment_router, health_router, jobs_router, resumes_router
 
@@ -27,6 +30,17 @@ def _configure_application_logging() -> None:
     logging.getLogger("app").setLevel(numeric_level)
 
 
+def _enable_fault_diagnostics() -> None:
+    """Enable fatal traceback dumping for crashes without Python exceptions."""
+    if faulthandler.is_enabled():
+        return
+    try:
+        faulthandler.enable(all_threads=True)
+        logger.info("Enabled faulthandler for backend diagnostics.")
+    except Exception as e:
+        logger.warning("Failed to enable faulthandler: %s", e)
+
+
 _configure_application_logging()
 
 
@@ -34,6 +48,7 @@ _configure_application_logging()
 async def lifespan(app: FastAPI):
     """Application lifespan manager."""
     # Startup
+    _enable_fault_diagnostics()
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     # PDF renderer uses lazy initialization - will initialize on first use
     # await init_pdf_renderer()
@@ -65,6 +80,18 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.exception_handler(AIServiceError)
+async def handle_ai_service_error(_: object, exc: AIServiceError) -> JSONResponse:
+    """Return a stable error contract for provider/model failures."""
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "detail": exc.detail,
+            "error_code": exc.error_code,
+        },
+    )
 
 # Include routers
 app.include_router(health_router, prefix="/api/v1")

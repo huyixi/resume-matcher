@@ -1,6 +1,6 @@
 .resume-body {
   /* Typography */
-  --resume-font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  --resume-font-mono: var(--font-mono);
 
   /* Text colors */
   --resume-text-primary: #000000;

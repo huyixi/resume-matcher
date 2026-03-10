@@ -45,4 +45,39 @@ describe('improve proxy route', () => {
     expect(response.headers.has('connection')).toBe(false);
     await expect(response.json()).resolves.toEqual({ ok: true });
   });
+
+  it('returns a stable 502 JSON response when the upstream body stream breaks', async () => {
+    const upstreamResponse = new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('partial'));
+          controller.error(new Error('socket hang up'));
+        },
+      }),
+      {
+        status: 500,
+        headers: {
+          'content-type': 'text/plain; charset=utf-8',
+        },
+      }
+    );
+
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(upstreamResponse);
+    const request = new Request('http://127.0.0.1:3000/api/v1/resumes/improve/preview', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ resume_id: 'resume-1', job_id: 'job-1' }),
+    });
+
+    const response = await POST(request, {
+      params: Promise.resolve({ path: ['preview'] }),
+    });
+
+    expect(response.status).toBe(502);
+    await expect(response.json()).resolves.toEqual({
+      detail: 'Failed to reach resume backend. Please try again.',
+    });
+  });
 });

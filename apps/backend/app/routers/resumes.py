@@ -5,6 +5,7 @@ import copy
 import hashlib
 import json
 import logging
+import math
 import unicodedata
 from collections.abc import Awaitable
 from pathlib import Path
@@ -12,11 +13,12 @@ from typing import Any, NoReturn
 from uuid import uuid4
 
 from fastapi import APIRouter, File, HTTPException, Query, UploadFile
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 
 from app.database import db
 from app.pdf import render_resume_pdf, PDFRenderError
 from app.config import settings
+from app.llm import AIServiceError
 
 logger = logging.getLogger(__name__)
 from app.schemas import (
@@ -140,8 +142,79 @@ def _raise_improve_error(
     error: Exception,
     detail: str,
 ) -> NoReturn:
-    logger.error("Resume %s failed during %s: %s", action, stage, error)
+    if isinstance(error, AIServiceError):
+        logger.warning(
+            "Resume %s failed during %s with AI error %s.",
+            action,
+            stage,
+            error.error_code,
+        )
+        raise error
+    logger.exception("Resume %s failed during %s.", action, stage)
     raise HTTPException(status_code=500, detail=detail)
+
+
+def _log_improve_stage(
+    action: str,
+    stage: str,
+    *,
+    job_id: str,
+    prompt_id: str | None = None,
+) -> None:
+    """Emit structured stage logs without leaking resume/job contents."""
+    logger.info(
+        "Resume %s stage=%s job_id=%s prompt_id=%s",
+        action,
+        stage,
+        job_id,
+        prompt_id or "<default>",
+    )
+
+
+def _sanitize_json_value(value: Any, path: str) -> Any:
+    """Recursively coerce response values into JSON-safe primitives."""
+    if isinstance(value, float):
+        if math.isfinite(value):
+            return value
+        logger.warning("Coercing non-finite float at %s to 0.0.", path)
+        return 0.0
+    if isinstance(value, list):
+        return [
+            _sanitize_json_value(item, f"{path}[{index}]")
+            for index, item in enumerate(value)
+        ]
+    if isinstance(value, dict):
+        return {
+            key: _sanitize_json_value(val, f"{path}.{key}")
+            for key, val in value.items()
+        }
+    return value
+
+
+def _finalize_improve_response(
+    response: ImproveResumeResponse,
+    *,
+    context: str,
+) -> ImproveResumeResponse:
+    """Validate that improve responses are JSON-safe before returning."""
+    payload = _sanitize_json_value(response.model_dump(), context)
+    try:
+        json.dumps(payload, ensure_ascii=False, allow_nan=False)
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"{context} is not JSON serializable: {e}") from e
+    return ImproveResumeResponse.model_validate(payload)
+
+
+def _as_improve_json_response(response: ImproveResumeResponse) -> JSONResponse:
+    """Return a concrete JSON response and bypass FastAPI response_model re-serialization."""
+    payload = response.model_dump(mode="json")
+    json_response = JSONResponse(content=payload)
+    logger.info(
+        "Resume improve response payload_size_bytes=%d request_id=%s",
+        len(json_response.body),
+        response.request_id,
+    )
+    return json_response
 
 
 def _get_original_resume_data(resume: dict[str, Any]) -> dict[str, Any] | None:
@@ -455,10 +528,10 @@ async def list_resumes(include_master: bool = Query(False)) -> ResumeListRespons
     return ResumeListResponse(request_id=str(uuid4()), data=summaries)
 
 
-@router.post("/improve/preview", response_model=ImproveResumeResponse)
+@router.post("/improve/preview")
 async def improve_resume_preview_endpoint(
     request: ImproveResumeRequest,
-) -> ImproveResumeResponse:
+) -> Response:
     """Preview a tailored resume without persisting it.
 
     The response includes resume_preview data but leaves resume_id null.
@@ -477,13 +550,31 @@ async def improve_resume_preview_endpoint(
     stage = "load_job_keywords"
     detail = "Failed to preview resume. Please try again."
     try:
+        _log_improve_stage(
+            "preview",
+            stage,
+            job_id=request.job_id,
+            prompt_id=prompt_id,
+        )
         job_keywords = job.get("job_keywords")
         job_keywords_hash = job.get("job_keywords_hash")
         content_hash = _hash_job_content(job["content"])
         if not job_keywords or job_keywords_hash != content_hash:
             stage = "extract_job_keywords"
+            _log_improve_stage(
+                "preview",
+                stage,
+                job_id=request.job_id,
+                prompt_id=prompt_id,
+            )
             job_keywords = await extract_job_keywords(job["content"])
             stage = "persist_job_keywords"
+            _log_improve_stage(
+                "preview",
+                stage,
+                job_id=request.job_id,
+                prompt_id=prompt_id,
+            )
             # Cache extracted keywords with a content hash for basic invalidation.
             try:
                 updated_job = db.update_job(
@@ -502,6 +593,12 @@ async def improve_resume_preview_endpoint(
                     e,
                 )
         stage = "improve_resume"
+        _log_improve_stage(
+            "preview",
+            stage,
+            job_id=request.job_id,
+            prompt_id=prompt_id,
+        )
         improved_data = await improve_resume(
             original_resume=resume["content"],
             job_description=job["content"],
@@ -520,6 +617,12 @@ async def improve_resume_preview_endpoint(
 
         # Multi-pass refinement: keyword injection, AI phrase removal, alignment validation
         stage = "refine_resume"
+        _log_improve_stage(
+            "preview",
+            stage,
+            job_id=request.job_id,
+            prompt_id=prompt_id,
+        )
         refinement_stats: RefinementStats | None = None
         refinement_attempted = False
         refinement_successful = False
@@ -575,13 +678,34 @@ async def improve_resume_preview_endpoint(
             if refinement_attempted:
                 response_warnings.append(f"Refinement failed: {str(e)}")
 
+        stage = "serialize_improved_data"
+        _log_improve_stage(
+            "preview",
+            stage,
+            job_id=request.job_id,
+            prompt_id=prompt_id,
+        )
         improved_text = json.dumps(improved_data, indent=2)
+        stage = "hash_improved_data"
+        _log_improve_stage(
+            "preview",
+            stage,
+            job_id=request.job_id,
+            prompt_id=prompt_id,
+        )
         preview_hash = _hash_improved_data(improved_data)
         preview_hashes = job.get("preview_hashes")
         if not isinstance(preview_hashes, dict):
             preview_hashes = {}
         preview_hashes[prompt_id] = preview_hash
         # NOTE: preview_hashes updates are last-write-wins; concurrent previews can race.
+        stage = "persist_preview_hash"
+        _log_improve_stage(
+            "preview",
+            stage,
+            job_id=request.job_id,
+            prompt_id=prompt_id,
+        )
         try:
             updated_job = db.update_job(
                 request.job_id,
@@ -600,6 +724,12 @@ async def improve_resume_preview_endpoint(
                 "Failed to persist preview hash for job %s: %s", request.job_id, e
             )
         stage = "calculate_diff"
+        _log_improve_stage(
+            "preview",
+            stage,
+            job_id=request.job_id,
+            prompt_id=prompt_id,
+        )
         diff_summary, detailed_changes, diff_error = _calculate_diff_from_resume(
             resume,
             improved_data,
@@ -607,10 +737,23 @@ async def improve_resume_preview_endpoint(
         if diff_error:
             response_warnings.append(f"Could not calculate changes: {diff_error}")
         stage = "generate_improvements"
+        _log_improve_stage(
+            "preview",
+            stage,
+            job_id=request.job_id,
+            prompt_id=prompt_id,
+        )
         improvements = generate_improvements(job_keywords)
 
         request_id = str(uuid4())
-        return ImproveResumeResponse(
+        stage = "build_response_model"
+        _log_improve_stage(
+            "preview",
+            stage,
+            job_id=request.job_id,
+            prompt_id=prompt_id,
+        )
+        response = ImproveResumeResponse(
             request_id=request_id,
             data=ImproveResumeData(
                 request_id=request_id,
@@ -624,8 +767,8 @@ async def improve_resume_preview_endpoint(
                     }
                     for imp in improvements
                 ],
-                markdownOriginal=resume["content"],
-                markdownImproved=improved_text,
+                markdownOriginal=None,
+                markdownImproved=None,
                 cover_letter=None,
                 outreach_message=None,
                 diff_summary=diff_summary,
@@ -636,6 +779,25 @@ async def improve_resume_preview_endpoint(
                 refinement_successful=refinement_successful,
             ),
         )
+        stage = "validate_response_json"
+        _log_improve_stage(
+            "preview",
+            stage,
+            job_id=request.job_id,
+            prompt_id=prompt_id,
+        )
+        finalized_response = _finalize_improve_response(
+            response,
+            context="preview_response",
+        )
+        stage = "return_response"
+        _log_improve_stage(
+            "preview",
+            stage,
+            job_id=request.job_id,
+            prompt_id=prompt_id,
+        )
+        return _as_improve_json_response(finalized_response)
     except Exception as e:
         _raise_improve_error("preview", stage, e, detail)
 
@@ -752,7 +914,8 @@ async def improve_resume_confirm_endpoint(
             improvements=improvements_payload,
         )
 
-        return ImproveResumeResponse(
+        stage = "build_response_model"
+        response = ImproveResumeResponse(
             request_id=request_id,
             data=ImproveResumeData(
                 request_id=request_id,
@@ -769,16 +932,17 @@ async def improve_resume_confirm_endpoint(
                 warnings=response_warnings,
             ),
         )
+        return response
     except HTTPException:
         raise
     except Exception as e:
         _raise_improve_error("confirm", stage, e, detail)
 
 
-@router.post("/improve", response_model=ImproveResumeResponse)
+@router.post("/improve")
 async def improve_resume_endpoint(
     request: ImproveResumeRequest,
-) -> ImproveResumeResponse:
+) -> Response:
     """Improve/tailor a resume for a specific job description.
 
     Uses LLM to analyze the job and generate an optimized resume version
@@ -801,14 +965,17 @@ async def improve_resume_endpoint(
     enable_cover_letter = feature_config.get("enable_cover_letter", False)
     enable_outreach = feature_config.get("enable_outreach_message", False)
     language = _get_content_language()
+    prompt_id = request.prompt_id or _get_default_prompt_id()
+    stage = "extract_job_keywords"
+    detail = "Failed to improve resume. Please try again."
 
     try:
         # Extract keywords from job description
+        stage = "extract_job_keywords"
         job_keywords = await extract_job_keywords(job["content"])
 
         # Generate improved resume in the configured language
-        prompt_id = request.prompt_id or _get_default_prompt_id()
-
+        stage = "improve_resume"
         improved_data = await improve_resume(
             original_resume=resume["content"],
             job_description=job["content"],
@@ -882,9 +1049,11 @@ async def improve_resume_endpoint(
                 response_warnings.append(f"Refinement failed: {str(e)}")
 
         # Convert improved data to JSON string for storage
+        stage = "serialize_improved_data"
         improved_text = json.dumps(improved_data, indent=2)
 
         # Calculate differences between original and improved resume
+        stage = "calculate_diff"
         diff_summary, detailed_changes, diff_error = _calculate_diff_from_resume(
             resume,
             improved_data,
@@ -893,9 +1062,11 @@ async def improve_resume_endpoint(
             response_warnings.append(f"Could not calculate changes: {diff_error}")
 
         # Generate improvement suggestions
+        stage = "generate_improvements"
         improvements = generate_improvements(job_keywords)
 
         # Generate cover letter, outreach message, and title in parallel if enabled
+        stage = "generate_auxiliary_messages"
         (
             cover_letter,
             outreach_message,
@@ -911,6 +1082,7 @@ async def improve_resume_endpoint(
         response_warnings.extend(aux_warnings)
 
         # Store the tailored resume with cover letter, outreach message, and title
+        stage = "create_resume"
         tailored_resume = db.create_resume(
             content=improved_text,
             content_type="json",
@@ -926,6 +1098,7 @@ async def improve_resume_endpoint(
 
         # Store improvement record
         request_id = str(uuid4())
+        stage = "create_improvement"
         db.create_improvement(
             original_resume_id=request.resume_id,
             tailored_resume_id=tailored_resume["resume_id"],
@@ -933,7 +1106,8 @@ async def improve_resume_endpoint(
             improvements=improvements,
         )
 
-        return ImproveResumeResponse(
+        stage = "build_response_model"
+        response = ImproveResumeResponse(
             request_id=request_id,
             data=ImproveResumeData(
                 request_id=request_id,
@@ -960,13 +1134,16 @@ async def improve_resume_endpoint(
                 refinement_successful=refinement_successful,
             ),
         )
-
-    except Exception as e:
-        logger.error(f"Resume improvement failed: {e}")
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to improve resume. Please try again.",
+        stage = "validate_response_json"
+        finalized_response = _finalize_improve_response(
+            response,
+            context="improve_response",
         )
+        return _as_improve_json_response(finalized_response)
+    except HTTPException:
+        raise
+    except Exception as e:
+        _raise_improve_error("improve", stage, e, detail)
 
 
 @router.patch("/{resume_id}", response_model=ResumeFetchResponse)

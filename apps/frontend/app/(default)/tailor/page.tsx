@@ -13,6 +13,7 @@ import {
   previewImproveResume,
   confirmImproveResume,
 } from '@/lib/api/resume';
+import { getTailorErrorKey } from '@/lib/errors/tailor';
 import { fetchPromptConfig, type PromptOption } from '@/lib/api/config';
 import { Dropdown } from '@/components/ui/dropdown';
 import { useStatusCache } from '@/lib/context/status-cache';
@@ -174,23 +175,7 @@ export default function TailorPage() {
       setShowDiffModal(true);
     } catch (err) {
       console.error(err);
-      // Check for common error patterns
-      const errorMessage = err instanceof Error ? err.message : '';
-      if (
-        errorMessage.toLowerCase().includes('api key') ||
-        errorMessage.toLowerCase().includes('unauthorized') ||
-        errorMessage.toLowerCase().includes('authentication') ||
-        errorMessage.includes('401')
-      ) {
-        setError(t('tailor.errors.apiKeyError'));
-      } else if (
-        errorMessage.toLowerCase().includes('rate limit') ||
-        errorMessage.includes('429')
-      ) {
-        setError(t('tailor.errors.rateLimit'));
-      } else {
-        setError(t('tailor.errors.failedToPreview'));
-      }
+      setError(t(getTailorErrorKey(err)));
     }
   };
 

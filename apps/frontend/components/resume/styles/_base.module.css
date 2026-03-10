@@ -8,8 +8,8 @@
   --font-size-base: 14px;
   --header-scale: 2;
   --section-header-scale: 1.2;
-  --header-font: ui-serif, Georgia, Cambria, 'Times New Roman', Times, serif;
-  --body-font: ui-sans-serif, system-ui, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji';
+  --header-font: var(--font-serif);
+  --body-font: var(--font-sans);
 
   /* Margin defaults - used as padding inside the resume container */
   --margin-top: 10mm;
