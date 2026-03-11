@@ -974,7 +974,7 @@ export default function SettingsPage() {
                   {supportedLanguages.map((lang) => (
                     <button
                       key={`ui-${lang}`}
-                      onClick={() => setUiLanguage(lang as Locale)}
+                      onClick={() => void setUiLanguage(lang as Locale)}
                       disabled={languageLoading}
                       className={`px-4 py-3 text-sm ${SEGMENTED_BUTTON_BASE} ${uiLanguage === lang ? SEGMENTED_BUTTON_ACTIVE : SEGMENTED_BUTTON_INACTIVE}`}
                     >
