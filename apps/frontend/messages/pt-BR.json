@@ -563,6 +563,8 @@
       "jobDescriptionTooShort": "Descrição da vaga muito curta. Por favor, forneça mais detalhes.",
       "apiKeyError": "Erro na chave de API. Verifique sua configuração de LLM em Configurações.",
       "rateLimit": "Limite de requisições atingido. Por favor, aguarde um momento e tente novamente.",
+      "llmUnavailable": "O serviço de LLM está temporariamente indisponível. Tente novamente em instantes.",
+      "invalidModelResponse": "O LLM retornou uma resposta inválida. Tente novamente ou troque de modelo.",
       "failedToGenerate": "Falha ao gerar currículo. Verifique suas configurações e tente novamente.",
       "failedToPreview": "Falha ao pré-visualizar o currículo. Verifique suas configurações e tente novamente.",
       "failedToConfirm": "Falha ao confirmar o currículo. Tente novamente."

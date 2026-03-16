@@ -15,7 +15,7 @@ describe('template font configuration', () => {
   });
 
   it('keeps the default generated CSS variables on the shared font tokens', () => {
-    const cssVars = settingsToCssVars();
+    const cssVars = settingsToCssVars() as Record<string, string>;
 
     expect(cssVars['--header-font']).toBe('var(--font-serif)');
     expect(cssVars['--body-font']).toBe('var(--font-sans)');
